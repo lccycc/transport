@@ -271,3 +271,8 @@ endif
 let OmniCpp_DefaultNamespaces = ["std"]
 
 "lcc:
+"disable C-a (increase number by one, it's terrible!) and C-x
+nnoremap <C-a> <nop>
+nnoremap <C-x> <nop>
+"disable # key which highlights the word under current cursor
+nnoremap # <nop>
