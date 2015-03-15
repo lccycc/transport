@@ -1,53 +1,16 @@
 <?php
 
-// Note:
-//     Please try to use the https url to bypass keyword filtering.
-//     Otherwise, dont forgot set [paas]passowrd in proxy.ini
-// Contributor:
-//     Phus Lu        <phus.lu@gmail.com>
 
-$__version__  = '2.1.13';
-$__password__ = '';
-$__timeout__  = 20;
-$__status__ = 0;
-$__xorchar__ = '';
+$__version__  = '3.1.2';
+$__password__ = '123456';
+$__hostsdeny__ = array(); // $__hostsdeny__ = array('.youtube.com', '.youku.com');
+$__content_type__ = 'image/gif';
+$__timeout__ = 20;
+$__content__ = '';
 
-function decode_request($data) {
-    list($headers_length) = array_values(unpack('n', substr($data, 0, 2)));
-    $headers_data = gzinflate(substr($data, 2, $headers_length));
-    $body = substr($data, 2+intval($headers_length));
-
-    $method  = '';
-    $url     = '';
-    $headers = array();
-    $kwargs  = array();
-
-    foreach (explode("\n", $headers_data) as $kv) {
-        $pair = explode(':', $kv, 2);
-        $key  = $pair[0];
-        $value = trim($pair[1]);
-        if ($key == 'G-Method') {
-            $method = $value;
-        } else if ($key == 'G-Url') {
-            $url = $value;
-        } else if (substr($key, 0, 2) == 'G-') {
-            $kwargs[strtolower(substr($key, 2))] = $value;
-        } else if ($key) {
-            $headers[$key] = $value;
-        }
-    }
-    if (isset($headers['Content-Encoding'])) {
-        if ($headers['Content-Encoding'] == 'deflate') {
-            $body = gzinflate($body);
-            $headers['Content-Length'] = strval(strlen($body));
-            unset($headers['Content-Encoding']);
-        }
-    }
-    return array($method, $url, $headers, $kwargs, $body);
-}
 
 function message_html($title, $banner, $detail) {
-    $error = <<<ERROR_STRING
+    $error = <<<MESSAGE_STRING
 <html><head>
 <meta http-equiv="content-type" content="text/html;charset=utf-8">
 <title>${title}</title>
@@ -75,90 +38,133 @@ ${detail}
 </blockquote>
 <table width=100% cellpadding=0 cellspacing=0><tr><td bgcolor=#3366cc><img alt="" width=1 height=4></td></tr></table>
 </body></html>
-ERROR_STRING;
+MESSAGE_STRING;
     return $error;
 }
 
-function header_function($ch, $header) {
-    if (substr($header, 0, 5) == 'HTTP/') {
-        $terms = explode(' ', $header);
-        $status = intval($terms[1]);
-        $GLOBALS['__status__'] == $status;
-        header('X-Status: ' . $status);
-    } elseif (substr($header, 0, 17) == 'Transfer-Encoding') {
-        // skip transfer-encoding
+
+function decode_request($data) {
+    list($headers_length) = array_values(unpack('n', substr($data, 0, 2)));
+    $headers_data = gzinflate(substr($data, 2, $headers_length));
+    $body = substr($data, 2+intval($headers_length));
+
+    $lines = explode("\r\n", $headers_data);
+
+    $request_line_items = explode(" ", array_shift($lines));
+    $method = $request_line_items[0];
+    $url = $request_line_items[1];
+
+    $headers = array();
+    $kwargs  = array();
+    $kwargs_prefix = 'X-URLFETCH-';
+
+    foreach ($lines as $line) {
+        if (!$line)
+            continue;
+        $pair = explode(':', $line, 2);
+        $key  = $pair[0];
+        $value = trim($pair[1]);
+        if (stripos($key, $kwargs_prefix) === 0) {
+            $kwargs[strtolower(substr($key, strlen($kwargs_prefix)))] = $value;
+        } else if ($key) {
+            $key = join('-', array_map('ucfirst', explode('-', $key)));
+            $headers[$key] = $value;
+        }
+    }
+    if (isset($headers['Content-Encoding'])) {
+        if ($headers['Content-Encoding'] == 'deflate') {
+            $body = gzinflate($body);
+            $headers['Content-Length'] = strval(strlen($body));
+            unset($headers['Content-Encoding']);
+        }
+    }
+    return array($method, $url, $headers, $kwargs, $body);
+}
+
+
+function echo_content($content) {
+    global $__password__, $__content_type__;
+    if ($__content_type__ == 'image/gif') {
+        echo $content ^ str_repeat($__password__[0], strlen($content));
     } else {
-        header($header, false, 200);
+        echo $content;
+    }
+}
+
+
+function curl_header_function($ch, $header) {
+    global $__content__, $__content_type__;
+    $pos = strpos($header, ':');
+    if ($pos == false) {
+        $__content__ .= $header;
+    } else {
+        $key = join('-', array_map('ucfirst', explode('-', substr($header, 0, $pos))));
+        if ($key != 'Transfer-Encoding') {
+            $__content__ .= $key . substr($header, $pos);
+        }
+    }
+    if (preg_match('@^Content-Type: ?(audio/|image/|video/|application/octet-stream)@i', $header)) {
+        $__content_type__ = 'image/x-png';
+    }
+    if (!trim($header)) {
+        header('Content-Type: ' . $__content_type__);
     }
     return strlen($header);
 }
 
-function write_function($ch, $body) {
-    if ($GLOBALS['__xorchar__']) {
-        echo $body ^ str_repeat($GLOBALS['__xorchar__'], strlen($body));
-    } else {
-        echo $body;
+
+function curl_write_function($ch, $content) {
+    global $__content__;
+    if ($__content__) {
+        // for debug
+        // echo_content("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n");
+        echo_content($__content__);
+        $__content__ = '';
     }
-    return strlen($body);
+    echo_content($content);
+    return strlen($content);
 }
 
-function post()
-{
+
+function post() {
     list($method, $url, $headers, $kwargs, $body) = @decode_request(@file_get_contents('php://input'));
 
-    if ($GLOBALS['__password__']) {
-        if (!isset($kwargs['password']) || $GLOBALS['__password__'] != $kwargs['password']) {
+    $password = $GLOBALS['__password__'];
+    if ($password) {
+        if (!isset($kwargs['password']) || $password != $kwargs['password']) {
             header("HTTP/1.0 403 Forbidden");
-            echo '403 Forbidden';
+            echo message_html('403 Forbidden', 'Wrong Password', "please edit proxy.ini");
             exit(-1);
         }
     }
 
-    if (isset($kwargs['xorchar'])) {
-        $GLOBALS['__xorchar__'] = $kwargs['xorchar'];
-    }
-
-    if (isset($kwargs['hostip']) && isset($headers['Host'])) {
-        $ip = $kwargs['hostip'];
-        $url = preg_replace('#(.+://)([\w\.\-]+)#', '${1}'.$ip, $url);
-    }
-
-    $curl_opt = array();
-
-    $header_array = array();
-    if ($body) {
-        $headers['Content-Length'] = strval(strlen($body));
-    }
-    $headers['Connection'] = 'close';
-    foreach ($headers as $key => $value) {
-        if ($key) {
-            $header_array[] = join('-', array_map('ucfirst', explode('-', $key))).': '.$value;
+    $hostsdeny = $GLOBALS['__hostsdeny__'];
+    if ($hostsdeny) {
+        $urlparts = parse_url($url);
+        $host = $urlparts['host'];
+        foreach ($hostsdeny as $pattern) {
+            if (substr($host, strlen($host)-strlen($pattern)) == $pattern) {
+                echo_content("HTTP/1.0 403\r\n\r\n" . message_html('403 Forbidden', "hostsdeny matched($host)",  $url));
+                exit(-1);
+            }
         }
     }
 
-    $curl_opt[CURLOPT_HTTPHEADER] = $header_array;
-
-    $curl_opt[CURLOPT_RETURNTRANSFER] = true;
-    $curl_opt[CURLOPT_BINARYTRANSFER] = true;
-
-    $curl_opt[CURLOPT_HEADER]         = false;
-    $curl_opt[CURLOPT_HEADERFUNCTION] = 'header_function';
-    $curl_opt[CURLOPT_WRITEFUNCTION]  = 'write_function';
-
-
-    $curl_opt[CURLOPT_FAILONERROR]    = false;
-    $curl_opt[CURLOPT_FOLLOWLOCATION] = false;
-
-    $curl_opt[CURLOPT_CONNECTTIMEOUT] = $GLOBALS['__timeout__'];
-    $curl_opt[CURLOPT_TIMEOUT]        = $GLOBALS['__timeout__'];
-
-    if (isset($kwargs['validate']) && @strval($kwargs['validate'])) {
-        $curl_opt[CURLOPT_SSL_VERIFYPEER] = true;
-        $curl_opt[CURLOPT_SSL_VERIFYHOST] = true;
-    } else {
-        $curl_opt[CURLOPT_SSL_VERIFYPEER] = false;
-        $curl_opt[CURLOPT_SSL_VERIFYHOST] = false;
+    if ($body) {
+        $headers['Content-Length'] = strval(strlen($body));
     }
+    if (isset($headers['Connection'])) {
+        $headers['Connection'] = 'close';
+    }
+
+    $header_array = array();
+    foreach ($headers as $key => $value) {
+        $header_array[] = join('-', array_map('ucfirst', explode('-', $key))).': '.$value;
+    }
+
+    $timeout = $GLOBALS['__timeout__'];
+
+    $curl_opt = array();
 
     switch (strtoupper($method)) {
         case 'HEAD':
@@ -172,23 +178,43 @@ function post()
             break;
         case 'PUT':
         case 'DELETE':
-        case 'OPTIONS':
-        case 'TRACE':
             $curl_opt[CURLOPT_CUSTOMREQUEST] = $method;
             $curl_opt[CURLOPT_POSTFIELDS] = $body;
             break;
         default:
-            echo message_html("403 Forbidden", "Invalid Method: $method", "$method '$url'");
+            echo_content("HTTP/1.0 502\r\n\r\n" . message_html('502 Urlfetch Error', 'Invalid Method: ' . $method,  $url));
             exit(-1);
     }
 
+    $curl_opt[CURLOPT_HTTPHEADER] = $header_array;
+    $curl_opt[CURLOPT_RETURNTRANSFER] = true;
+    $curl_opt[CURLOPT_BINARYTRANSFER] = true;
+
+    $curl_opt[CURLOPT_HEADER]         = false;
+    $curl_opt[CURLOPT_HEADERFUNCTION] = 'curl_header_function';
+    $curl_opt[CURLOPT_WRITEFUNCTION]  = 'curl_write_function';
+
+    $curl_opt[CURLOPT_FAILONERROR]    = false;
+    $curl_opt[CURLOPT_FOLLOWLOCATION] = false;
+
+    $curl_opt[CURLOPT_CONNECTTIMEOUT] = $timeout;
+    $curl_opt[CURLOPT_TIMEOUT]        = $timeout;
+
+    $curl_opt[CURLOPT_SSL_VERIFYPEER] = false;
+    $curl_opt[CURLOPT_SSL_VERIFYHOST] = false;
+
     $ch = curl_init($url);
     curl_setopt_array($ch, $curl_opt);
-    curl_exec($ch);
+    $ret = curl_exec($ch);
     $errno = curl_errno($ch);
-    if ($errno && !$GLOBALS['__status__']) {
-        header('HTTP/1.1 502 Bad Gateway');
-        echo message_html("500 Internal Server Error", "PHP Urlfetch Error: $method", "cURL($errno): ".curl_error($ch));
+    if ($GLOBALS['__content__']) {
+        echo_content($GLOBALS['__content__']);
+    } else if ($errno) {
+        if (!headers_sent()) {
+            header('Content-Type: ' . $__content_type__);
+        }
+        $content = "HTTP/1.0 502\r\n\r\n" . message_html('502 Urlfetch Error', "PHP Urlfetch Error curl($errno)",  curl_error($ch));
+        echo_content($content);
     }
     curl_close($ch);
 }
@@ -202,6 +228,7 @@ function get() {
         header('Location: https://www.google.com');
     }
 }
+
 
 function main() {
     if ($_SERVER['REQUEST_METHOD'] == 'POST') {
